@@ -5,7 +5,7 @@
 //Defines
 //#define DEBUG
 #define PLUGIN_DESCRIPTION "Automatically takes custom files and precaches them and adds them to the downloads table."
-#define PLUGIN_VERSION "1.0.3"
+#define PLUGIN_VERSION "1.0.4"
 
 //Sourcemod Includes
 #include <sourcemod>
@@ -22,12 +22,13 @@ enum eLoad
 {
 	Load_Materials,
 	Load_Models,
-	Load_Sounds
+	Load_Sounds,
+	Load_Particles
 }
 
 public Plugin myinfo =
 {
-	name = "Auto File Loader",
+	name = "[ANY] Auto File Loader",
 	author = "Drixevel",
 	description = PLUGIN_DESCRIPTION,
 	version = PLUGIN_VERSION,
@@ -37,38 +38,91 @@ public Plugin myinfo =
 public void OnPluginStart()
 {
 	LoadTranslations("common.phrases");
-	//LoadTranslations("_.phrases");
 
 	CreateConVar("sm_autofileloader_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_REPLICATED | FCVAR_NOTIFY | FCVAR_SPONLY | FCVAR_DONTRECORD);
 	cvar_Status = CreateConVar("sm_autofileloader_status", "1", "Status of the plugin.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	cvar_Exclusions = CreateConVar("sm_autofileloader_exclusions_file", "configs/afl_exclusions.cfg", "File location to use for the exclusions config.", FCVAR_NOTIFY);
 
-	//AutoExecConfig();
+	AutoExecConfig();
 
-	array_Exclusions = CreateArray(ByteCountToCells(PLATFORM_MAX_PATH));
+	array_Exclusions = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
 
-	array_Downloadables = CreateArray(ByteCountToCells(6));
-	PushArrayString(array_Downloadables, ".vmt");
-	PushArrayString(array_Downloadables, ".vtf");
-	PushArrayString(array_Downloadables, ".vtx");
-	PushArrayString(array_Downloadables, ".mdl");
-	PushArrayString(array_Downloadables, ".phy");
-	PushArrayString(array_Downloadables, ".vvd");
-	PushArrayString(array_Downloadables, ".wav");
-	PushArrayString(array_Downloadables, ".mp3");
+	array_Downloadables = new ArrayList(ByteCountToCells(6));
+	array_Downloadables.PushString(".vmt");
+	array_Downloadables.PushString(".vtf");
+	array_Downloadables.PushString(".vtx");
+	array_Downloadables.PushString(".mdl");
+	array_Downloadables.PushString(".phy");
+	array_Downloadables.PushString(".vvd");
+	array_Downloadables.PushString(".wav");
+	array_Downloadables.PushString(".mp3");
+	array_Downloadables.PushString(".pcf");
 
-	RegAdminCmd("sm_generateexternals", Command_GenerateExternals, ADMFLAG_ROOT);
-	RegAdminCmd("sm_ge", Command_GenerateExternals, ADMFLAG_ROOT);
+	RegAdminCmd("sm_glist", Command_GenerateList, ADMFLAG_ROOT);
 }
 
 public void OnMapStart()
 {
-	if (!GetConVarBool(cvar_Status))
+	if (!cvar_Status.BoolValue)
 	{
 		return;
 	}
 
 	PullExclusions();
+}
+
+public Action Command_GenerateList(int client, int args)
+{
+	StartProcess(true);
+	ReplyToCommand(client, "Generated, file should be under 'addons/sourcemod/logs/autofileloader.list.log'.");
+	return Plugin_Handled;
+}
+
+void PullExclusions()
+{
+	//Lets handle the excludions.
+	char sExclusionPath[PLATFORM_MAX_PATH];
+	cvar_Exclusions.GetString(sExclusionPath, sizeof(sExclusionPath));
+
+	char sPath[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, sPath, sizeof(sPath), sExclusionPath);
+
+	KeyValues kv = new KeyValues("autofileloader_exclusions");
+	
+	//Clear the exclusions preemptively to make sure that if we cleared out the config, it stays put.
+	array_Exclusions.Clear();
+	
+	//If this returns not found or empty, the file is empty so we don't do anything.
+	if (kv.ImportFromFile(sPath) && kv.GotoFirstSubKey(false))
+	{
+		char sEnabled[3]; char sExclude[PLATFORM_MAX_PATH];
+		do
+		{
+			//The key is kind of pointless so we make it had a meaning by making it a status for enabled or disabled.
+			kv.GetSectionName(sEnabled, sizeof(sEnabled));
+
+			if (StringToInt(sEnabled) > 0)
+			{
+				kv.GetString(NULL_STRING, sExclude, sizeof(sExclude));
+
+				if (strlen(sExclude) > 0)
+				{
+					array_Exclusions.PushString(sExclude);
+				}
+			}
+		}
+		while(kv.GotoNextKey());
+	}
+	else
+	{
+		//Config doesn't exist, lets create it.
+		kv.ExportToFile(sPath);
+	}
+
+	delete kv;
+	LogMessage("Exclusions parsed successfully.");
+	
+	//Make sure the exclusions are taken care of first.
 	StartProcess();
 }
 
@@ -84,7 +138,7 @@ void StartProcess(bool print = false)
 		FileType fType;
 		char sPath[PLATFORM_MAX_PATH];
 
-		while (ReadDirEntry(dir, sPath, sizeof(sPath), fType))
+		while (dir.GetNext(sPath, sizeof(sPath), fType))
 		{
 			//We only need to parse through directories here.
 			if (fType != FileType_Directory)
@@ -109,7 +163,7 @@ void StartProcess(bool print = false)
 }
 
 bool AutoLoadDirectory(const char[] path, bool print = false)
-{
+{	
 	DirectoryListing dir = OpenDirectory(path);
 
 	if (dir == null)
@@ -120,28 +174,32 @@ bool AutoLoadDirectory(const char[] path, bool print = false)
 	char sPath[PLATFORM_MAX_PATH];
 	FileType fType;
 
-	while (ReadDirEntry(dir, sPath, sizeof(sPath), fType))
+	while (dir.GetNext(sPath, sizeof(sPath), fType))
 	{
 		//We only need to parse through directories here.
 		if (fType != FileType_Directory)
 		{
 			continue;
 		}
-
+		
 		char sBuffer[PLATFORM_MAX_PATH];
 		Format(sBuffer, sizeof(sBuffer), "%s/%s", path, sPath);
 
 		if (StrEqual(sPath, "materials"))
 		{
-			AutoLoadFiles(sBuffer, path, Load_Materials, print);
+			AutoLoadFiles(sBuffer, Load_Materials, print);
 		}
 		else if (StrEqual(sPath, "models"))
 		{
-			AutoLoadFiles(sBuffer, path, Load_Models, print);
+			AutoLoadFiles(sBuffer, Load_Models, print);
 		}
 		else if (StrEqual(sPath, "sound"))
 		{
-			AutoLoadFiles(sBuffer, path, Load_Sounds, print);
+			AutoLoadFiles(sBuffer, Load_Sounds, print);
+		}
+		else if (StrEqual(sPath, "particles"))
+		{
+			AutoLoadFiles(sBuffer, Load_Particles, print);
 		}
 	}
 
@@ -149,12 +207,12 @@ bool AutoLoadDirectory(const char[] path, bool print = false)
 	return true;
 }
 
-bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool print = false)
+bool AutoLoadFiles(const char[] path, eLoad load, bool print = false)
 {
 	#if defined DEBUG
-	LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Loading Directory: %s - %s - %i", path, remove, load);
+	LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Loading Directory: %s - %i", path, load);
 	#endif
-
+	
 	DirectoryListing dir = OpenDirectory(path);
 
 	if (dir == null)
@@ -165,10 +223,10 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 	char sPath[PLATFORM_MAX_PATH];
 	FileType fType;
 
-	while (ReadDirEntry(dir, sPath, sizeof(sPath), fType))
+	while (dir.GetNext(sPath, sizeof(sPath), fType))
 	{
 		//Exclude these paths since they're invalid.
-		if (StrEqual(sPath, "..") || StrEqual(sPath, "."))
+		if (StrEqual(sPath, ".") || StrEqual(sPath, ".."))
 		{
 			continue;
 		}
@@ -177,7 +235,7 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 		Format(sBuffer, sizeof(sBuffer), "%s/%s", path, sPath);
 
 		//Check if we're on the exclusion list and if we are, skip us.
-		if (FindStringInArray(array_Exclusions, sBuffer) != -1)
+		if (array_Exclusions.FindString(sBuffer) != -1)
 		{
 			continue;
 		}
@@ -187,37 +245,36 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 			case FileType_Directory:
 			{
 				//This is a directory so we should recursively auto load its files the same way.
-				AutoLoadFiles(sBuffer, remove, load, print);
+				AutoLoadFiles(sBuffer, load, print);
 			}
 
 			case FileType_File:
 			{
-				//Some paths don't need to be absolute due to how precache functions work with Sourcemod.
-				ReplaceString(sBuffer, sizeof(sBuffer), remove, "");
-				RemoveFrontString(sBuffer, sizeof(sBuffer), 1);
+				//Remove any dots and slashes at the start of the path.
+				RemoveFrontString(sBuffer, sizeof(sBuffer), 2);
 				
 				#if defined DEBUG
 				LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Adding To Downloads Table: %s", sBuffer);
 				#endif
 
 				//Add this file to the downloads table if it has a valid extension.
-				for (int i = 0; i < GetArraySize(array_Downloadables); i++)
+				for (int i = 0; i < array_Downloadables.Length; i++)
 				{
 					char sExtension[6];
-					GetArrayString(array_Downloadables, i, sExtension, sizeof(sExtension));
+					array_Downloadables.GetString(i, sExtension, sizeof(sExtension));
 
 					if (StrContains(sBuffer, sExtension) != -1)
 					{
 						if (print)
 						{
-							LogToFileEx2("addons/sourcemod/logs/autofileloader.generate.log", "%s", sBuffer);
+							LogToFileEx2("addons/sourcemod/logs/autofileloader.list.log", "Download: %s", sBuffer);
 						}
 						
 						AddFileToDownloadsTable(sBuffer);
 						break;
 					}
 				}
-
+				
 				switch (load)
 				{
 					case Load_Materials:
@@ -227,6 +284,11 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 							#if defined DEBUG
 							LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Precaching Decal: %s", sBuffer);
 							#endif
+							
+							if (print)
+							{
+								LogToFileEx2("addons/sourcemod/logs/autofileloader.list.log", "Precache Material: %s", sBuffer);
+							}
 							
 							PrecacheDecal(sBuffer);
 						}
@@ -241,6 +303,13 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 							LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Precaching Model: %s", sBuffer);
 							#endif
 							
+							if (print)
+							{
+								LogToFileEx2("addons/sourcemod/logs/autofileloader.list.log", "Precache Model: %s", sBuffer);
+							}
+
+							//Model paths require the "models/" prefix to be removed when precaching, Valves rules.
+							ReplaceString(sBuffer, sizeof(sBuffer), "models/", "");
 							PrecacheModel(sBuffer);
 						}
 					}
@@ -253,8 +322,31 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 							LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Precaching Sound: %s", sBuffer);
 							#endif
 							
+							if (print)
+							{
+								LogToFileEx2("addons/sourcemod/logs/autofileloader.list.log", "Precache Sound: %s", sBuffer);
+							}
+							
+							//Sound paths require the "sound/" prefix to be removed when precaching, Valves rules.
 							ReplaceString(sBuffer, sizeof(sBuffer), "sound/", "");
 							PrecacheSound(sBuffer);
+						}
+					}
+					
+					case Load_Particles:
+					{
+						if (StrContains(sPath, ".pcf") != -1)
+						{
+							#if defined DEBUG
+							LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Precaching Particles File: %s", sBuffer);
+							#endif
+							
+							if (print)
+							{
+								LogToFileEx2("addons/sourcemod/logs/autofileloader.list.log", "Precache Particles: %s", sBuffer);
+							}
+							
+							PrecacheGeneric(sBuffer);
 						}
 					}
 				}
@@ -266,77 +358,22 @@ bool AutoLoadFiles(const char[] path, const char[] remove, eLoad load, bool prin
 	return true;
 }
 
-stock void LogToFileEx2(const char[] file_location, const char[] format, any ...)
+void LogToFileEx2(const char[] path, const char[] format, any ...)
 {
 	char sBuffer[1024];
 	VFormat(sBuffer, sizeof(sBuffer), format, 3);
 	
-	Handle file = OpenFile(file_location,"a");
+	File file = OpenFile(path, "a");
 	
 	if (file != null)
 	{
-		WriteFileLine(file, sBuffer);
+		file.WriteLine(sBuffer);
 	}
 	
-	CloseHandle(file);
+	delete file;
 }
 
-stock void RemoveFrontString(char[] strInput, int iSize, int iVar)
+void RemoveFrontString(char[] strInput, int iSize, int iVar)
 {
 	strcopy(strInput, iSize, strInput[iVar]);
-}
-
-public Action Command_GenerateExternals(int client, int args)
-{
-	StartProcess(true);
-	ReplyToCommand(client, "Generated, file should be under 'addons/sourcemod/logs/autofileloader.generate.log'.");
-	return Plugin_Handled;
-}
-
-void PullExclusions()
-{
-	//Lets handle the excludions.
-	char sExclusionPath[PLATFORM_MAX_PATH];
-	GetConVarString(cvar_Exclusions, sExclusionPath, sizeof(sExclusionPath));
-
-	char sPath[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, sPath, sizeof(sPath), sExclusionPath);
-
-	KeyValues kv = CreateKeyValues("autofileloader_exclusions");
-
-	if (FileToKeyValues(kv, sPath))
-	{
-		//Config exists, lets clear the exclusions now so we can pull the new list.
-		ClearArray(array_Exclusions);
-
-		//If this returns empty, the file is empty so we don't do anything.
-		if (KvGotoFirstSubKey(kv, false))
-		{
-			do
-			{
-				//The key is kind of pointless so we make it had a meaning by making it a status for enabled or disabled.
-				char sEnabled[1];
-				KvGetSectionName(kv, sEnabled, sizeof(sEnabled));
-
-				if (StringToInt(sEnabled))
-				{
-					char sExclude[PLATFORM_MAX_PATH];
-					KvGetString(kv, NULL_STRING, sExclude, sizeof(sExclude));
-
-					if (strlen(sExclude) > 0)
-					{
-						PushArrayString(array_Exclusions, sExclude);
-					}
-				}
-			}
-			while(KvGotoNextKey(kv, false));
-		}
-	}
-	else
-	{
-		//Config doesn't exist, lets create it.
-		KeyValuesToFile(kv, sPath);
-	}
-
-	delete kv;
 }
