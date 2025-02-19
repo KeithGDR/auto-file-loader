@@ -5,7 +5,7 @@
 //Defines
 //#define DEBUG
 #define PLUGIN_DESCRIPTION "Automatically takes custom files and precaches them and adds them to the downloads table."
-#define PLUGIN_VERSION "1.0.4"
+#define PLUGIN_VERSION "1.0.5"
 
 //Sourcemod Includes
 #include <sourcemod>
@@ -13,10 +13,10 @@
 
 //Globals
 ConVar cvar_Status;
-ConVar cvar_Exclusions;
+ConVar cvar_Custom;
 
 ArrayList array_Exclusions;
-ArrayList array_Downloadables;
+StringMap array_Custom;
 
 enum eLoad
 {
@@ -26,13 +26,16 @@ enum eLoad
 	Load_Particles
 }
 
+char g_Map[64];
+char g_FileTypes[][] = {".vmt", ".vtf", ".vtx", ".mdl", ".phy", ".vvd", ".wav", ".mp3", ".pcf"};
+
 public Plugin myinfo =
 {
 	name = "[ANY] Auto File Loader",
-	author = "Drixevel",
+	author = "KeithGDR",
 	description = PLUGIN_DESCRIPTION,
 	version = PLUGIN_VERSION,
-	url = "https://drixevel.dev/"
+	url = "https://forums.alliedmods.net/showthread.php?p=2490210"
 };
 
 public void OnPluginStart()
@@ -40,23 +43,12 @@ public void OnPluginStart()
 	LoadTranslations("common.phrases");
 
 	CreateConVar("sm_autofileloader_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_REPLICATED | FCVAR_NOTIFY | FCVAR_SPONLY | FCVAR_DONTRECORD);
-	cvar_Status = CreateConVar("sm_autofileloader_status", "1", "Status of the plugin.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_Exclusions = CreateConVar("sm_autofileloader_exclusions_file", "configs/afl_exclusions.cfg", "File location to use for the exclusions config.", FCVAR_NOTIFY);
-
+	cvar_Status = CreateConVar("sm_autofileloader_status", "1", "Is the plugin enabled or disabled?", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_Custom = CreateConVar("sm_autofileloader_custom", "1", "Should the plugin try to load everything in custom?", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	AutoExecConfig();
 
 	array_Exclusions = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
-
-	array_Downloadables = new ArrayList(ByteCountToCells(6));
-	array_Downloadables.PushString(".vmt");
-	array_Downloadables.PushString(".vtf");
-	array_Downloadables.PushString(".vtx");
-	array_Downloadables.PushString(".mdl");
-	array_Downloadables.PushString(".phy");
-	array_Downloadables.PushString(".vvd");
-	array_Downloadables.PushString(".wav");
-	array_Downloadables.PushString(".mp3");
-	array_Downloadables.PushString(".pcf");
+	array_Custom = new StringMap();
 
 	RegAdminCmd("sm_glist", Command_GenerateList, ADMFLAG_ROOT);
 }
@@ -68,61 +60,89 @@ public void OnMapStart()
 		return;
 	}
 
-	PullExclusions();
+	GetCurrentMap(g_Map, sizeof(g_Map));
+	GetMapDisplayName(g_Map, g_Map, sizeof(g_Map));
+	ParseConfig();
 }
 
 public Action Command_GenerateList(int client, int args)
 {
 	StartProcess(true);
-	ReplyToCommand(client, "Generated, file should be under 'addons/sourcemod/logs/autofileloader.list.log'.");
+	ReplyToCommand(client, "[SM] Generated, file should be under 'addons/sourcemod/logs/autofileloader.list.log'.");
 	return Plugin_Handled;
 }
 
-void PullExclusions()
+void ParseConfig()
 {
-	//Lets handle the excludions.
-	char sExclusionPath[PLATFORM_MAX_PATH];
-	cvar_Exclusions.GetString(sExclusionPath, sizeof(sExclusionPath));
-
 	char sPath[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, sPath, sizeof(sPath), sExclusionPath);
+	BuildPath(Path_SM, sPath, sizeof(sPath), "configs/autofileloader.cfg");
 
-	KeyValues kv = new KeyValues("autofileloader_exclusions");
-	
-	//Clear the exclusions preemptively to make sure that if we cleared out the config, it stays put.
-	array_Exclusions.Clear();
+	KeyValues kv = new KeyValues("autofileloader");
 	
 	//If this returns not found or empty, the file is empty so we don't do anything.
-	if (kv.ImportFromFile(sPath) && kv.GotoFirstSubKey(false))
-	{
-		char sEnabled[3]; char sExclude[PLATFORM_MAX_PATH];
+	if (!kv.ImportFromFile(sPath)) {
+		return;
+	}
+	
+	if (kv.JumpToKey("exclude") && kv.GotoFirstSubKey(false)) {
+		array_Exclusions.Clear();
+
+		char sExclude[PLATFORM_MAX_PATH]; char sStatus[16];
+
 		do
 		{
-			//The key is kind of pointless so we make it had a meaning by making it a status for enabled or disabled.
-			kv.GetSectionName(sEnabled, sizeof(sEnabled));
+			kv.GetSectionName(sExclude, sizeof(sExclude));
 
-			if (StringToInt(sEnabled) > 0)
+			if (strlen(sExclude) == 0) {
+				continue;
+			}
+
+			kv.GetString(NULL_STRING, sStatus, sizeof(sStatus));
+
+			if (StringToInt(sStatus) > 0)
 			{
-				kv.GetString(NULL_STRING, sExclude, sizeof(sExclude));
+				array_Exclusions.PushString(sExclude);
 
-				if (strlen(sExclude) > 0)
-				{
-					array_Exclusions.PushString(sExclude);
-				}
+				#if defined DEBUG
+				LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Parsing Config - 'exclude': %s", sExclude);
+				#endif
 			}
 		}
-		while(kv.GotoNextKey());
+		while(kv.GotoNextKey(false));
+
+		kv.GoBack(); kv.GoBack();
 	}
-	else
-	{
-		//Config doesn't exist, lets create it.
-		kv.ExportToFile(sPath);
+	
+	if (kv.JumpToKey("custom") && kv.GotoFirstSubKey(false)) {
+		array_Custom.Clear();
+
+		char sMapOrPrefix[PLATFORM_MAX_PATH]; char sCustomFolder[16];
+
+		do
+		{
+			kv.GetSectionName(sMapOrPrefix, sizeof(sMapOrPrefix));
+
+			if (strlen(sMapOrPrefix) == 0) {
+				continue;
+			}
+
+			kv.GetString(NULL_STRING, sCustomFolder, sizeof(sCustomFolder));
+
+			if (strlen(sCustomFolder) > 0)
+			{
+				array_Custom.SetString(sMapOrPrefix, sCustomFolder);
+
+				#if defined DEBUG
+				LogToFileEx("addons/sourcemod/logs/autofileloader.debug.log", "Parsing Config - 'custom': %s - %s", sMapOrPrefix, sCustomFolder);
+				#endif
+			}
+		}
+		while(kv.GotoNextKey(false));
 	}
 
 	delete kv;
-	LogMessage("Exclusions parsed successfully.");
+	LogMessage("Configuration file parsed successfully.");
 	
-	//Make sure the exclusions are taken care of first.
 	StartProcess();
 }
 
@@ -133,6 +153,7 @@ void StartProcess(bool print = false)
 
 	//Load all the folders inside of the custom folder and load their files.
 	DirectoryListing dir = OpenDirectory("custom");
+
 	if (dir != null)
 	{
 		FileType fType;
@@ -155,11 +176,39 @@ void StartProcess(bool print = false)
 			char sBuffer[PLATFORM_MAX_PATH];
 			Format(sBuffer, sizeof(sBuffer), "custom/%s", sPath);
 
+			if (!cvar_Custom.BoolValue && !IsCustomFolderAllowed(sPath)) {
+				continue;
+			}
+
 			AutoLoadDirectory(sBuffer, print);
 		}
 
 		delete dir;
 	}
+}
+
+bool IsCustomFolderAllowed(const char[] folder) {
+	StringMapSnapshot snap = array_Custom.Snapshot();
+
+	for (int i = 0; i < snap.Length; i++) {
+		int size = snap.KeyBufferSize(i);
+
+		char[] map = new char[size];
+		snap.GetKey(i, map, size);
+
+		if (StrContains(g_Map, map, false) != 0) {
+			continue;
+		}
+
+		char custom[PLATFORM_MAX_PATH];
+		if (array_Custom.GetString(map, custom, sizeof(custom)) && StrEqual(custom, folder, false)) {
+			return true;
+		}
+	}
+
+	delete snap;
+
+	return false;
 }
 
 bool AutoLoadDirectory(const char[] path, bool print = false)
@@ -258,12 +307,9 @@ bool AutoLoadFiles(const char[] path, eLoad load, bool print = false)
 				#endif
 
 				//Add this file to the downloads table if it has a valid extension.
-				for (int i = 0; i < array_Downloadables.Length; i++)
+				for (int i = 0; i < sizeof(g_FileTypes); i++)
 				{
-					char sExtension[6];
-					array_Downloadables.GetString(i, sExtension, sizeof(sExtension));
-
-					if (StrContains(sBuffer, sExtension) != -1)
+					if (StrContains(sBuffer, g_FileTypes[i]) != -1)
 					{
 						if (print)
 						{
